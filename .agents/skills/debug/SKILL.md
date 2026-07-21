@@ -1,0 +1,112 @@
+---
+name: debug
+description: A root-cause debugging method for the Django/DRF + Celery + Channels + Next.js stack — reproduce, isolate, hypothesize, fix the cause not the symptom, verify, add a regression test. Use when tracking down a bug, a 500, a flaky test, missing data, a stale UI, or an N+1 query, when asked to "debug", "why is this broken", "figure out why", or "find the root cause", and when deciding where to read logs (Django, Celery, Daphne, browser console/network). Not for proving a finished change works end to end (see verify) or optimizing already-correct code (see perf-review).
+---
+
+# Debug (find the root cause, not the symptom)
+
+## When to use
+Something is wrong — a 500, a wrong number, a UI that won't update, a query storm,
+a test that fails one run in ten — and you need to find *why*, not paper over it.
+The goal is a fix at the cause, backed by a test that would have caught it.
+
+## Pattern
+Five steps, in order — skipping one is how band-aids happen:
+
+1. **Reproduce.** A reliable repro (command, click-path, failing test) before any fix.
+   Can't reproduce it → you can't confirm you fixed it.
+2. **Isolate.** Bisect the surface — narrow which layer, request, or line owns the
+   failure. Read the logs at that layer (below), don't guess. Read a traceback
+   *bottom-up*: the final line is the real error, the frames above are how you got
+   there — jump to the deepest frame that is *your* code, not the framework.
+   Change one thing at a time; batched edits hide which change mattered.
+3. **Hypothesize.** State a specific, falsifiable cause ("stale cache because the
+   mutation never invalidates the list key"), then test *that*.
+4. **Fix the root cause.** Change the thing that is actually wrong, not the symptom.
+   A `try/except` that swallows the error, a hard-coded retry, a `refetchInterval`
+   masking a missing invalidation — those are band-aids. Resist them.
+5. **Verify + regression test.** Reproduce the original failure, show it gone (see
+   `verify`), and add a test that fails on the old code (see `write-tests`).
+
+## Where the logs live
+| Layer | Where to look |
+| --- | --- |
+| Django request/500 | dev server stdout; set `DEBUG=True` locally for the traceback |
+| Celery task | worker stdout (`celery -A myproject worker -l info`), not the web log |
+| Channels/websocket | Daphne stdout (`daphne myproject.asgi:application`) — the dev ASGI server |
+| Frontend | browser **Console** (errors) + **Network** tab (status, payload, timing) |
+
+## Playbook: N+1 query (symptom = slow list, log full of near-identical SELECTs)
+Spot it: one query per row instead of one for the set. Fix at the queryset, not by caching.
+
+```python
+# BEFORE — 1 query for invoices + 1 per invoice for .client + N for .lines  (N+1)
+qs = Invoice.objects.filter(entreprise=request.user.entreprise)
+# AFTER — FK followed in the join; reverse/M2M batched into one extra query
+qs = (Invoice.objects
+      .filter(entreprise=request.user.entreprise)
+      .select_related("client")        # forward FK / OneToOne → SQL JOIN
+      .prefetch_related("lines"))       # reverse FK / M2M → one batched IN query
+# Confirm the count dropped: assertNumQueries, or django-debug-toolbar.
+```
+
+## Playbook: React Query stale data (symptom = UI shows old value until refresh)
+Root cause is usually a mutation that changes the server but never invalidates the
+cache — not a caching bug to mask with `refetchInterval`. In the mutation's
+`onSuccess`, call `queryClient.invalidateQueries` for the exact keys the mutation
+touches (the list key *and* the affected detail key), so both refetch. See
+`react-query` for the key-factory pattern.
+
+## Read-only Redis/Valkey + queue inspection
+When jobs are stuck or websocket events go missing, the stall is usually in the
+pipeline between producer and consumer — inspect the broker/cache **read-only** to
+see where it stops.
+- **Queue depth.** `LLEN <queue>` (default Celery queue is `celery`) — a growing
+  depth means tasks are enqueued but no worker is consuming; zero depth with no
+  result means they never enqueued.
+- **Reserved / active tasks.** `celery -A myproject inspect active` /
+  `reserved` / `stats` shows what each worker is holding — a task stuck "active"
+  for minutes is blocking a slot.
+- **Stuck / unacked messages.** With late-ack, a crashed worker leaves messages
+  unacked until its visibility timeout expires; look for the same task redelivered
+  in a loop.
+- **Channels group membership.** A missing websocket event usually means the
+  consumer never joined the group, or the sender used a different group name — check
+  the group key the code builds (e.g. `entreprise_{id}`) matches on both sides.
+
+**Absolute rule:** never mutate or flush prod broker/cache state while debugging — no
+`FLUSHALL`, `DEL`, `PURGE`, or requeue on a live system. That destroys the evidence and
+can drop real work. Observe, form a hypothesis, then fix in code. See `celery-tasks`
+and `websockets-channels`.
+
+## Adapt to your repo
+Rename `Entreprise`/`entreprise`, `myproject.asgi`, and the query keys/routes to
+match your project. Confirm your actual log locations and the command that starts
+each process (worker, Daphne/ASGI). Match query keys to your app's real key factory.
+
+## Gotchas
+- A 403 or an empty list is often the auth/tenant layer *working correctly*, not a bug.
+  Confirm the request carried the right identity and scope (auth header, tenant id such
+  as `X-Tenant-ID`) before you touch a guard. Never "fix" a 403 by deleting the
+  permission check, or an empty list by loosening the tenant filter — that ships a
+  security hole. Fix the missing permission or the wrong scope instead.
+- Many unrelated endpoints failing at once points at a *shared resource* (DB, connection
+  pool, cache, auth, load balancer), not one view. Suspect the common layer first — see
+  `incident-response`.
+- Believe the evidence over your memory, and assume *your* code is wrong before the
+  framework's — the bug is far more likely in the line you wrote yesterday.
+- Fixing the symptom (swallow the exception, add a retry, poll on an interval) leaves
+  the cause live — it resurfaces elsewhere. Name the cause before you touch code.
+- No repro = no fix. If it's intermittent, find the ordering/timing/data that triggers it.
+- `select_related` is for forward FK/OneToOne (a JOIN); `prefetch_related` is for
+  reverse FK/M2M (a second batched query). Swapping them silently does nothing.
+- A 500 with `DEBUG=False` hides the traceback — read the server log, don't guess.
+- Close the loop: a fix without a failing-then-passing regression test isn't done.
+
+## See also
+- `verify`
+- `perf-review`
+- `react-query`
+- `incident-response`
+- `celery-tasks`
+- `websockets-channels`

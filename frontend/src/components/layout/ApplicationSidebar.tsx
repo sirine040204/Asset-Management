@@ -38,7 +38,7 @@ export function ApplicationSidebar() {
 
       <nav className="flex-1 pb-8">
         <SidebarNavSection title="Tableau de bord">
-          <SidebarNavItem icon={LayoutDashboard} label="Vue d'ensemble" href="/" isActive />
+          <SidebarNavItem icon={LayoutDashboard} label="Vue d'ensemble" href="/" />
         </SidebarNavSection>
 
         <SidebarNavSection title="Structure">
