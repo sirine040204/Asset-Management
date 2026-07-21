@@ -11,7 +11,7 @@ export type AppRole =
 // Mock hook - in a real app, this would read from a UserContext or JWT token
 export function usePermissions() {
   // Hardcoded for demonstration purposes
-  const currentRole: AppRole = 'ADMIN_SOCIETE';
+  const currentRole = 'ADMIN_SOCIETE' as AppRole;
 
   const hasRole = (allowedRoles: AppRole[]) => {
     // SUPER_ADMIN typically has all permissions

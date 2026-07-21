@@ -1,6 +1,6 @@
 // API Service mapping to the Enterprise Core Conventions backend
 
-const BASE_URL = 'http://localhost:8000/api/v1';
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 export interface EnterpriseResponse<T> {
   success: boolean;
